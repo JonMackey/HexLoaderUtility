@@ -1,0 +1,4 @@
+_DelSyncFiles
+*.syncfolderspro
+project.xcworkspace
+xcuserdata
