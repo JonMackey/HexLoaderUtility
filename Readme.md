@@ -2,7 +2,7 @@
 
 HexLoaderUtility is an Objective-C Mac OS X app that exports Intel HEX and configuration files related to a sketch recently Verified or Uploaded using the Arduino IDE.
 
-These files are for use with the SD Hex Loader ISP board.  See the [SD Hex Loader ISP instructable](https://github.com) << Will update once the instructable is published << for a detailed description of this board.
+These files are for use with the SD Hex Loader ISP board.  See the [SD Hex Loader ISP instructable](https://www.instructables.com/AVR-SD-Hex-Loader-ISP/)  for a detailed description of this project.
 
 # Usage
 Launch both the Arduino IDE and the HexLoaderUtility applications.  Note that when the Arduino IDE quits it removes all of the temporary files created since the IDE launched.  For this reason you need to keep the Arduino IDE running while using the HexLoaderUtility.  The first time you run the HexLoaderUtility you need to select the Arduino IDE and the folder where you would like to export the hex and configuration files.
