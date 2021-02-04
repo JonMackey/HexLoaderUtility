@@ -52,7 +52,8 @@ const SKey kMemoryKeys[] =
 	{"blocksize", IJSONElement::eNumber},
 	{"size", IJSONElement::eNumber},
 	{"page_size", IJSONElement::eNumber},
-	{"readsize", IJSONElement::eNumber}
+	{"readsize", IJSONElement::eNumber},
+	{"write", IJSONElement::eString}
 };
 
 /***************************** AvrdudeConfigFile ******************************/
@@ -186,17 +187,18 @@ uint8_t AvrdudeConfigFile::ReadNextToken(
 	if (thisChar)
 	{
 		inInputBuffer.StartSubString();
-		do
+		while (true)
 		{
 			switch (thisChar)
 			{
 				/*
-				*	Any reserved character terminates the token.
+				*	Any reserved character and EOB terminates the token.
 				*	Return the reserved character.
 				*/
 				case '=':
 				case '\"':
 				case ';':
+				case 0:
 					inInputBuffer.AppendSubString(outToken);
 					break;
 				/*
@@ -215,7 +217,7 @@ uint8_t AvrdudeConfigFile::ReadNextToken(
 					continue;
 			}
 			break;
-		} while (thisChar);
+		}
 	}
 	return(thisChar);
 }
@@ -310,6 +312,46 @@ uint8_t AvrdudeConfigFile::ReadUInt32NumberValue(
 	} else
 	{
 		mError = eUnterminatedValueErr;
+	}
+	return(thisChar);
+}
+
+/****************************** ReadStringValue *******************************/
+/*
+*	Returns a string value with bounding quotes removed.  This could be the
+*	concatenation of several sub strings connected with commas such as
+*	instruction strings.
+*/
+uint8_t AvrdudeConfigFile::ReadStringValue(
+	InputBuffer&	inInputBuffer,
+	std::string&	outValue)
+{
+	uint8_t	thisChar;
+	while (true)
+	{
+		thisChar = SkipWhitespaceAndComments(inInputBuffer);
+		if (thisChar == '\"')
+		{
+			inInputBuffer++;	// skip the leading quote
+			thisChar = inInputBuffer.ReadTillNextQuote(false, outValue);
+			if (thisChar)
+			{
+				thisChar = SkipWhitespaceAndComments(inInputBuffer);
+				/*
+				*	If this is the continuation char...
+				*/
+				if (thisChar == ',')
+				{
+					// Separate the sub strings with a space.
+					// For instruction strings, this avoids 'a' or 'aN' binding
+					// with 1 or 0 of the sub string.
+					outValue += ' ';
+					inInputBuffer++;	// skip the continuation char
+					continue;
+				}
+			}
+		}
+		break;
 	}
 	return(thisChar);
 }
@@ -562,7 +604,8 @@ uint8_t AvrdudeConfigFile::ReadPartEntry(
 						name.clear();
 						inInputBuffer.ReadTillNextQuote(false, name);
 						if (name.compare("flash") == 0 ||
-							name.compare("eeprom") == 0)
+							name.compare("eeprom") == 0 ||
+							name.compare("lock") == 0)
 						{
 							JSONObject*	memoryEntry = ReadMemoryEntry(inInputBuffer);
 							if (memoryEntry)
@@ -583,50 +626,43 @@ uint8_t AvrdudeConfigFile::ReadPartEntry(
 				case IJSONElement::eString:
 				case IJSONElement::eString | 0x10:
 				case IJSONElement::eString | 0x20:
+				{
+					std::string	valueStr;
 					inInputBuffer++;	// skip the assignment operator
-					thisChar = SkipWhitespaceAndComments(inInputBuffer);
-					if (thisChar == '\"')
+					thisChar = ReadStringValue(inInputBuffer, valueStr);
+					if (thisChar == ';')
 					{
-						std::string	valueStr;
-						inInputBuffer++;	// skip the leading quote
-						thisChar = inInputBuffer.ReadTillNextQuote(false, valueStr);
-						if (thisChar)
+						if (itr->second & 0x10)
 						{
-							thisChar = SkipWhitespaceAndComments(inInputBuffer);
-							if (thisChar == ';')
+							if (valueStr.length() > 0)
 							{
-								if (itr->second & 0x10)
-								{
-									if (valueStr.length() > 0)
-									{
-										entryKey.assign(valueStr);
-									} else
-									{
-										mError = eEmptyIDStrErr;
-									}
-								} else if (itr->second & 0x20)
-								{
-									if (valueStr.length() > 0)
-									{
-										entryDesc.assign(valueStr);
-									} else
-									{
-										mError = eEmptyDescStrErr;
-									}
-								}
-								if (!mError)
-								{
-									InsertKeyValue(thisEntry, token, valueStr);
-									inInputBuffer++;	// skip the value terminator
-									continue;
-								}
+								entryKey.assign(valueStr);
+							} else
+							{
+								mError = eEmptyIDStrErr;
 							}
+						} else if (itr->second & 0x20)
+						{
+							if (valueStr.length() > 0)
+							{
+								entryDesc.assign(valueStr);
+							} else
+							{
+								mError = eEmptyDescStrErr;
+							}
+						}
+						if (!mError)
+						{
+							InsertKeyValue(thisEntry, token, valueStr);
+							inInputBuffer++;	// skip the value terminator
+							continue;
 						}
 					} else
 					{
 						mError = eUnexpectedCharErr;
 					}
 					break;
+				}
 				case IJSONElement::eNumber:
 				{
 					std::string	value32;
@@ -637,6 +673,9 @@ uint8_t AvrdudeConfigFile::ReadPartEntry(
 						InsertKeyValue(thisEntry, token, value32);
 						inInputBuffer++;	// skip the value terminator
 						continue;
+					} else if (!mError)
+					{
+						mError = eUnexpectedCharErr;
 					}
 					break;
 				}
@@ -648,7 +687,7 @@ uint8_t AvrdudeConfigFile::ReadPartEntry(
 		} else if (thisChar == ';')
 		{
 			inInputBuffer++;	// skip the value terminator
-		} else
+		} else if (!mError)
 		{
 			mError = eUnexpectedCharErr;
 		}
@@ -686,17 +725,37 @@ JSONObject* AvrdudeConfigFile::ReadMemoryEntry(
 			AvrdudeKeyMap::const_iterator	itr = mMemoryKeyMap.find(token);
 			if (itr != mMemoryKeyMap.end())
 			{
-				std::string	value32;
-				inInputBuffer++;	// skip the assignment operator
-				thisChar = ReadUInt32NumberValue(inInputBuffer, value32);
-				if (thisChar == ';')
+				switch (itr->second)
 				{
-					InsertKeyValue(thisEntry, token, value32);
-					inInputBuffer++;	// skip the value terminator
-					continue;
-				} else
-				{
-					mError = eUnexpectedCharErr;
+					case IJSONElement::eNumber:
+					{
+						std::string	value32;
+						inInputBuffer++;	// skip the assignment operator
+						thisChar = ReadUInt32NumberValue(inInputBuffer, value32);
+						if (thisChar == ';')
+						{
+							InsertKeyValue(thisEntry, token, value32);
+							inInputBuffer++;	// skip the value terminator
+							continue;
+						} else if (!mError)
+						{
+							mError = eUnexpectedCharErr;
+						}
+					}
+					case IJSONElement::eString:
+						inInputBuffer++;	// skip the assignment operator
+						std::string	valueStr;
+						thisChar = ReadStringValue(inInputBuffer, valueStr);
+						if (thisChar == ';')
+						{
+							InsertKeyValue(thisEntry, token, valueStr);
+							inInputBuffer++;	// skip the value terminator
+							continue;
+						} else
+						{
+							mError = eUnexpectedCharErr;
+						}
+						break;
 				}
 			} else
 			{
@@ -866,6 +925,39 @@ bool AvrdudeConfigFile::IDForDesc(
 		}
 	}
 	return(foundID);
+}
+
+/********************** InterpretInstructionAsInputMask ***********************/
+/*
+*	The Nth byte of the passed instruction string is interpreted as a mask where
+*	'i' is 1, and all others are cleared bits.
+*	The instruction format is defined in the avrdude.conf comments.
+*/
+uint8_t AvrdudeConfigFile::InterpretInstructionAsInputMask(
+	const std::string&	inInstStr,
+	uint8_t				inNthByteOfInst)
+{
+	StringInputBuffer	inputBuffer(inInstStr);
+	uint8_t		mask = 0;
+	std::string	token;
+	uint32_t	maskStart = inNthByteOfInst*8;
+	uint32_t	maskEnd = maskStart + 8;
+
+	for (uint32_t maskIndex = 0; maskIndex < maskEnd && inputBuffer.NotAtEOB(); maskIndex++)
+	{
+		uint8_t	thisChar = ReadNextToken(inputBuffer, token);
+		if (maskIndex < maskStart)
+		{
+			continue;
+		}
+		thisChar = token.c_str()[0];
+		mask <<= 1;
+		if (thisChar == 'i')
+		{
+			mask |= 1;
+		}
+	}
+	return(mask);
 }
 
 #pragma mark - AvrdudeConfigFiles

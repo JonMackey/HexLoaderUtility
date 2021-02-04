@@ -71,6 +71,9 @@ public:
 								std::string&			outString);
 	static std::string&		ToLowercase(
 								std::string&			ioString);
+	static uint8_t			InterpretInstructionAsInputMask(
+								const std::string&		inInstStr,
+								uint8_t					inNthByteOfInst);
 	enum EErrors
 	{
 		eNoErr,
@@ -106,6 +109,9 @@ protected:
 								InputBuffer&			inInputBuffer,
 								std::string&			outToken);
 	uint8_t					ReadUInt32NumberValue(
+								InputBuffer&			inInputBuffer,
+								std::string&			outValue);
+	uint8_t					ReadStringValue(
 								InputBuffer&			inInputBuffer,
 								std::string&			outValue);
 	uint8_t					SkipEntry(

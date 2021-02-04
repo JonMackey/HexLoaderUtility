@@ -767,6 +767,7 @@ AvrdudeConfigFiles* _avrdudeConfigFiles;
 					*		parent (only used by Export)
 					*/
 					devEntry->EraseElement("parent");
+					devEntry->EraseElement("eeprom.write");	// Not used
 					/*
 					*	Add:
 					*		upload.speed
@@ -803,6 +804,88 @@ AvrdudeConfigFiles* _avrdudeConfigFiles;
 						char byteCountStr[15];
 						snprintf(byteCountStr, 15, "%d", ((NSNumber*)(inSketchRec[kLengthKey])).intValue);
 						devEntry->InsertElement("byte_count", new JSONString(byteCountStr));
+					}
+					/*
+					*	Add the fuses
+					*	fuses extended, high, and low are merged into a single uint32_t.
+					*/
+					{
+						std::string	value;
+						char fusesStr[15];
+						uint32_t	hexVal, fuses;
+						keysNotFound = 0;
+						configFile->ValueForKey("bootloader.extended_fuses", value, keysNotFound);
+						sscanf(value.c_str(), "%x", &fuses);
+						value.clear();
+						keysNotFound = 0;
+						configFile->ValueForKey("bootloader.high_fuses", value, keysNotFound);
+						sscanf(value.c_str(), "%x", &hexVal);
+						fuses = (fuses<<8) + hexVal;
+						value.clear();
+						keysNotFound = 0;
+						configFile->ValueForKey("bootloader.low_fuses", value, keysNotFound);
+						sscanf(value.c_str(), "%x", &hexVal);
+						fuses = (fuses<<8) + hexVal;
+						snprintf(fusesStr, 15, "0x%x", fuses);
+						valueStr.assign(fusesStr);
+						devEntry->InsertElement("fuses", new JSONString(valueStr));
+					}
+					/*
+					*	Add the lock bits
+					*	lock mask, lock, unlock are merged into a single int.
+					*/
+					{
+						std::string	value;
+						char lockBitsStr[15];
+						uint32_t	hexVal, lockBits = 0, lockMask = 0;
+						keysNotFound = 0;
+						{
+							// Detaching an element removes it and passes ownership to the caller.
+							JSONString* lockWrite = (JSONString*)devEntry->DetachElement("lock.write");
+							if (lockWrite)
+							{
+								lockMask = lockBits = AvrdudeConfigFile::InterpretInstructionAsInputMask(lockWrite->GetString(), 3);
+								delete lockWrite;
+								/*
+								*	If InterpretInstructionAsInputMask for byte 3 is 0 then the
+								*	current version of the hex loader won't be able to support the
+								*	target device.  The loader expects the SPM write lock bits instruction
+								*	to be of the form 0xAC 0xE0 0x00 <lock bits>.
+								*/
+								if (!lockMask)
+								{
+									[self->_hexLoaderLogViewController postWarningString: [NSString stringWithFormat:
+										@"The lock instruction for device %@ is not of the form AC E0 00 <lock bits>. "
+										 "The SD Hex Loader does not support setting fuses and/or bootloaders for this device.",
+											inSketchRec[kDeviceNameKey]]];
+								}
+							}
+						}
+						configFile->ValueForKey("bootloader.lock_bits", value, keysNotFound);
+						sscanf(value.c_str(), "%x", &hexVal);
+						hexVal &= lockMask;
+						lockBits = (lockBits<<8) + hexVal;
+						value.clear();
+						keysNotFound = 0;
+						configFile->ValueForKey("bootloader.unlock_bits", value, keysNotFound);
+						sscanf(value.c_str(), "%x", &hexVal);
+						hexVal &= lockMask;
+						lockBits = (lockBits<<8) + hexVal;
+						
+						
+						snprintf(lockBitsStr, 15, "0x%x", lockBits);
+						valueStr.assign(lockBitsStr);
+						devEntry->InsertElement("lock_bits", new JSONString(valueStr));
+					}
+					/*
+					*	Get the bootloader ID.  It's set to 0 on error and if
+					*	this device doesn't have one.
+					*/
+					{
+						char bootloaderIDStr[15];
+						snprintf(bootloaderIDStr, 15, "%d", [self exportBootloaderForConfig:configFile]);
+						valueStr.assign(bootloaderIDStr);
+						devEntry->InsertElement("bootloader", new JSONString(valueStr));
 					}
 					/*
 					*	If this is the DCSensor...
@@ -862,10 +945,172 @@ AvrdudeConfigFiles* _avrdudeConfigFiles;
 						}
 					}
 					AvrdudeConfigFile::Write(devEntry, outConfigText);
+					delete devEntry;
 				}
 			}
 		}
 	}
+}
+
+/************************* exportBootloaderForConfig **************************/
+/*
+*	If the BoardsConfigFile has a bootloader associated with it the ID of the
+*	associated bootloader is returned, else 0 is returned.
+*
+*	The file paths.txt located in the bootloaders folder of the Export folder,
+*	is used by this app to track the paths of the bootloaders already copied and
+*	their associated IDs.
+*
+*	This routine will copy the bootloader to the bootloaders folder within the
+*	Export folder if there is no entry within paths.txt.  If it is copied, the
+*	bootloader's name will be changed to the letter 'B' + the decimal value of
+*	the ID.  An entry in paths.txt will be added to map the original bootloader
+*	path.
+*/
+- (uint32_t)exportBootloaderForConfig:(BoardsConfigFile*)inConfigFile
+{
+	uint32_t	bootloaderID = 0;
+	
+	if (inConfigFile)
+	{
+		BOOL	isDirectory = NO;
+		BOOL	bootloaderLocated = NO;
+		uint32_t	keysNotFound = 0;
+		std::string	bootloaderfullPath;
+		NSString*	bootloaderPath = nullptr;
+		if (inConfigFile->ValueForKey("runtime.platform.path", bootloaderfullPath, keysNotFound) &&
+			keysNotFound == 0)
+		{
+			bootloaderfullPath.append("/bootloaders/");
+			if (inConfigFile->ValueForKey("bootloader.file", bootloaderfullPath, keysNotFound))
+			{
+				if (keysNotFound == 0)
+				{
+					bootloaderPath = [NSString stringWithUTF8String:bootloaderfullPath.c_str()];
+					bootloaderLocated = [[NSFileManager defaultManager] fileExistsAtPath:bootloaderPath isDirectory:&isDirectory] && isDirectory == NO;
+					if (!bootloaderLocated)
+					{
+						[_hexLoaderLogViewController postErrorString: [NSString stringWithFormat:@"Invalid bootloader path = %@", bootloaderPath]];
+					}
+				} else
+				{
+					[_hexLoaderLogViewController postErrorString: @"The value for key \"bootloader.file\" contains unresolved sub-keys."];
+				}
+			}
+		}
+
+		if (bootloaderLocated)
+		{
+			if (_exportFolderURL &&
+				[[NSFileManager defaultManager] fileExistsAtPath:_exportFolderURL.path isDirectory:&isDirectory] &&
+				isDirectory == YES)
+			{
+				NSURL*	bootloadersURL = [_exportFolderURL URLByAppendingPathComponent:@"bootloaders"];
+				if ( [[NSFileManager defaultManager] fileExistsAtPath:bootloadersURL.path isDirectory:&isDirectory])
+				{
+					if (isDirectory == NO)
+					{
+						[_hexLoaderLogViewController postErrorString: @"The Export folder reserves the name \"bootloaders\" for "
+							"use as a folder name within the Export folder.  Please move the file named \"bootloaders\" out of the Export folder."];
+					}
+				} else if ([[NSFileManager defaultManager] createDirectoryAtURL:bootloadersURL withIntermediateDirectories:NO attributes:nil error:nil])
+				{
+					isDirectory = YES;
+					[_hexLoaderLogViewController postInfoString: @"The \"bootloaders\" folder has been created in the Export folder."];
+				} else
+				{
+					[_hexLoaderLogViewController postErrorString: @"Unable to create the folder \"bootloaders\" within the Export folder"];
+				}
+				/*
+				*	If the sub folder "bootloaders" was successfully located or
+				*	created  within the  Export folder...
+				*/
+				if (isDirectory)
+				{
+					NSString*	pathsPath = [bootloadersURL.path stringByAppendingPathComponent:@"paths.txt"];
+					ConfigurationFile	pathsFile;
+					BOOL pathsFileExists = [[NSFileManager defaultManager] fileExistsAtPath:pathsPath isDirectory:&isDirectory] && isDirectory == NO;
+					
+					IndexVec	usedIDs;
+					BOOL		idError = false;
+					if (pathsFileExists &&
+						pathsFile.ReadFile(pathsPath.UTF8String))
+					{
+						const JSONObject* rootObject = pathsFile.GetRootObject();
+						const JSONElementMap&	jsonMap = rootObject->GetMap();
+						JSONElementMap::const_iterator	itr = jsonMap.begin();
+						JSONElementMap::const_iterator	itrEnd = jsonMap.end();
+						uint32_t	thisID;
+						for (; itr != itrEnd; ++itr)
+						{
+							thisID = atoi(itr->first.c_str());
+							if (thisID &&
+								!usedIDs.Contains(thisID))
+							{
+								usedIDs.Set(thisID, thisID);
+								if (!itr->second->IsJSONString() ||
+									((const JSONString*)(itr->second))->GetString().compare(bootloaderfullPath))
+								{
+									continue;
+								}
+								if (!bootloaderID)
+								{
+									bootloaderID = thisID;
+								} else
+								{
+									idError = true;
+									bootloaderID = 0;
+									[_hexLoaderLogViewController postErrorString: @"Duplicate path found in bootloaders/paths.txt.  Operation can't continue."];
+									break;
+								}
+							} else
+							{
+								idError = true;
+								bootloaderID = 0;
+								[_hexLoaderLogViewController postErrorString: @"Duplicate or invalid IDs found in bootloaders/paths.txt.  Operation can't continue."];
+								break;
+							}
+						}
+					}
+					if (!idError &&
+						bootloaderID == 0)
+					{
+						uint32_t newID = usedIDs.GetMax();
+						if (newID == 0)
+						{
+							newID = 1;
+						}
+						char idStr[15];
+						snprintf(idStr, 15, "%d", newID);
+						pathsFile.InsertKeyValue(idStr, bootloaderfullPath);
+						NSString*	exportedBootloaderPath = [bootloadersURL.path stringByAppendingPathComponent:[NSString stringWithFormat:@"B%d.hex", newID]];
+						if ([[NSFileManager defaultManager] copyItemAtPath:bootloaderPath toPath:exportedBootloaderPath error:nil])
+						{
+							std::string	paths;
+							AvrdudeConfigFile::Write(pathsFile.GetRootObject(), paths);
+							NSString* pathsContents = [NSString stringWithUTF8String:paths.c_str()];
+							if ([pathsContents writeToFile:pathsPath atomically:YES encoding:NSUTF8StringEncoding error:nil])
+							{
+								bootloaderID = newID;
+								[_hexLoaderLogViewController postInfoString: [NSString stringWithFormat:@"bootloaders/paths.txt bootloader path added for ID %d.", newID]];
+							} else
+							{
+								[[NSFileManager defaultManager] removeItemAtPath:exportedBootloaderPath error:nil];
+								[_hexLoaderLogViewController postErrorString: @"Can't update bootloaders/paths.txt.  Operation can't continue."];
+							}
+						} else
+						{
+							[_hexLoaderLogViewController postErrorString: @"Can't copy bootloader to bootloaders folder within Export folder.  Operation can't continue."];
+						}
+					}
+				}
+			} else
+			{
+				[self logExportFolderIsUndefined];
+			}
+		}
+	}
+	return(bootloaderID);
 }
 
 /************************* logExportFolderIsUndefined *************************/
